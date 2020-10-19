@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+
+import argparse
+import glob
+import logging
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+
+verbose = '--verbose' in sys.argv[1:] or '-v' in sys.argv[1:]
+logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, format="[%(levelname)s] %(message)s")
+
+
+def index(string):
+   values = re.findall(r'\d+', string)
+   if len(values) < 1:
+      return 0
+   return int(values[0])
+
+
+class Chdir(object):
+
+   def __init__(self, path):
+      self.path = path
+
+   def __enter__(self):
+      self.pwd = os.getcwd()
+      os.chdir(self.path)
+      return self
+
+   def __exit__(self, *args, **kwargs):
+      os.chdir(self.pwd)
+
+
+MARGIN = 36
+
+
+def page_basename(path):
+   name, ext = os.path.splitext(os.path.basename(path))
+   return "page-%03d%s" % (index(name), ext)
+
+
+def get_resolution(path):
+   return int(subprocess.check_output(["exiftool", "-XResolution", "-b", path]).decode('utf-8'))
+
+
+
+class Details(object):
+
+   def __init__(self, resolution, resize):
+      self.resolution = resolution
+      self.resize = resize
+
+
+def get_details(path, density):
+   resolution = get_resolution(path)
+   scale = resolution / density
+   resize = int(100 / scale)
+   return Details(resolution, resize)
+
+
+def generate_cbz(output_path, input_path):
+   output_path = os.path.abspath(output_path)
+   with Chdir(input_path):
+      subprocess.check_call(["zip", output_path] + sorted(glob.glob("*")))
+
+
+def crop_and_scale(output_directory, input_files, density):
+      for f in input_files:
+         basename = page_basename(f)
+         details = get_details(f, density)
+         assert details.resolution == 600, "Invalid resolution."
+         logging.info(f"Cropping and scaling '{os.path.basename(f)}' to {details.resize}% as '{basename}'...")
+         output_path = os.path.join(output_directory, basename)
+         subprocess.check_call(["convert",
+                                os.path.abspath(f),
+                                "-crop", "+%d+%d" % (MARGIN, MARGIN),
+                                "-crop", "-%d-%d" % (MARGIN, MARGIN),
+                                "-units", "PixelsPerInch",
+                                "-density", str(density),
+                                "-resize", "%d%%" % (details.resize, ),
+                                output_path])
+
+
+def convert_to_cbz(input_files, title, density):
+   with tempfile.TemporaryDirectory() as output_directory:
+      crop_and_scale(output_directory, input_files, density)
+      generate_cbz(f"{title}.cbz", output_directory)   
+
+
+def main():
+   parser = argparse.ArgumentParser(description="Generate PDF from images")
+   parser.add_argument('directory', help="directory containing PNG images")
+   parser.add_argument('--title', '-t', help="title")
+   parser.add_argument('--author', '-a', help="author")
+   parser.add_argument('--verbose', '-v', action='store_true', default=False, help="show verbose output")
+   options = parser.parse_args()
+
+   final_destination = os.getcwd()
+
+   with Chdir(options.directory):
+      files = glob.glob("*.png")
+      files = sorted(files, key=lambda x: index(x))
+      input_files = [os.path.abspath(f) for f in files]
+
+   convert_to_cbz(input_files, options.title, 600)
+
+   # Generate the reduced resolution CBZ and the PDF
+   with tempfile.TemporaryDirectory() as output_directory:
+      crop_and_scale(output_directory, input_files, 300)
+      with Chdir(output_directory):
+         output_files = [os.path.join(output_directory, f) for f in sorted(glob.glob("*"))]
+      logging.info("Generating PDF...")
+      temporary_pdf = os.path.join(output_directory, "output.pdf")
+      subprocess.check_call(["img2pdf",
+                             "--author", options.author,
+                             "--title", options.title,
+                             "-o", temporary_pdf] + output_files)
+      logging.info("Compressing PDF...")
+      subprocess.check_call(["gs",
+                             "-sDEVICE=pdfwrite",
+                             "-dCompatibilityLevel=1.4",
+                             "-dPDFSETTINGS=/prepress",
+                             "-dNOPAUSE",
+                             "-dQUIET",
+                             "-dBATCH",
+                             f"-sOutputFile={options.title}.pdf",
+                             temporary_pdf])
+
+if __name__ == "__main__":
+   main()
