@@ -82,6 +82,9 @@ def crop_and_scale(output_directory, input_files, density):
                                 "-units", "PixelsPerInch",
                                 "-density", str(density),
                                 "-resize", "%d%%" % (details.resize, ),
+                                "-background", "white",
+                                "-alpha", "remove",
+                                "-alpha", "off",
                                 output_path])
 
 
